@@ -1,40 +1,49 @@
 import os
-import pyverilog.vparser.ast as vast
+from pyverilog.vparser.parser import parse
+import sys
 
-# Function to recursively traverse the abstract syntax tree and build the syntax vector
-def build_syntax_vector(node, syntax_vector):
-    syntax_vector.append(node.__class__.__name__)
-    for child in node.children():
-        if isinstance(child, vast.Node):
-            build_syntax_vector(child, syntax_vector)
-        elif isinstance(child, list):
-            for item in child:
-                if isinstance(item, vast.Node):
-                    build_syntax_vector(item, syntax_vector)
+class Logger(object):
+    def __init__(self, filename="Default.log"):
+        self.terminal = sys.stdout
+        self.log = open(filename, "w", encoding="utf-8")  # Prevent encoding errors
 
-# Function to parse Verilog code and return the syntax vector
-def parse_verilog_to_syntax_vector(verilog_code):
-    ast = vast.parse(verilog_code)
-    syntax_vector = []
-    build_syntax_vector(ast, syntax_vector)
-    return syntax_vector
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
 
-if __name__ == "__main__":
-    # Directory containing the .v files
-    sample_dir = "AES-T_sample"
+    def flush(self):
+        pass
 
-    # Loop through all .v files in the directory
-    for i in range(600):
-        filename = os.path.join(sample_dir, f"{i}.v")
+def save_ast_to_file(ast_node, file_path):
+    # Save the AST to a file
+    with open(file_path, 'w', encoding="utf-8") as f:
+        ast_node.show(buf=f)
 
-        with open(filename, "r") as f:
-            verilog_code = f.read()
+def main():
+    input_dir = '../data/AES-T_Sample'
+    output_dir = '../data/AES-T_Sequence'
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
-        syntax_vector = parse_verilog_to_syntax_vector(verilog_code)
+    # Redirect the stdout to the file "ast_output.txt"
+    log_file = os.path.join(output_dir, "ast_output.txt")
+    sys.stdout = Logger(log_file)
 
-        # Save the syntax vector to a file with the same name as the .v file
-        with open(f"{i}_syntax_vector.txt", "w") as f:
-            for item in syntax_vector:
-                f.write(item + "\n")
+    for idx, file_name in enumerate(os.listdir(input_dir)):
+        if file_name.endswith('.v'):
+            file_path = os.path.join(input_dir, file_name)
+            ast, _ = parse([file_path])
 
-        print(f"Syntax vector for {filename} saved to {i}_syntax_vector.txt")
+            # Display AST on the console
+            ast.show()
+
+            # Save AST to a separate output file
+            output_file = os.path.splitext(file_name)[0] + "_ast_output.txt"
+            output_file_path = os.path.join(output_dir, output_file)
+            save_ast_to_file(ast, output_file_path)
+
+    # Reset stdout back to the console
+    sys.stdout = sys.__stdout__
+
+if __name__ == '__main__':
+    main()
