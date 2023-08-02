@@ -1,123 +1,140 @@
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import Dataset, DataLoader
 
-# Define Encoder Model
-class Encoder(nn.Module):
-    def __init__(self, input_shape, latent_dim):
-        super(Encoder, self).__init__()
-        self.conv1 = nn.Conv2d(1, 16, kernel_size=(3, 3), stride=(2, 2), padding=1)
-        self.relu1 = nn.ReLU()
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=(3, 3), stride=(2, 2), padding=1)
-        self.relu2 = nn.ReLU()
-        self.flatten = nn.Flatten()
-        self.fc1 = nn.Linear(32 * (input_shape[0]//4) * (input_shape[1]//4), 128)
-        self.relu3 = nn.ReLU()
-        self.fc2 = nn.Linear(128, latent_dim)
-        self.fc3 = nn.Linear(128, latent_dim)
+# Tokenize the input data
+def tokenize_input(data):
+    return [token for token in data.split() if token not in ['(', 'at', ')']]
 
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.relu1(x)
-        x = self.conv2(x)
-        x = self.relu2(x)
-        x = self.flatten(x)
-        x = self.fc1(x)
-        x = self.relu3(x)
-        z_mean = self.fc2(x)
-        z_log_var = self.fc3(x)
-        return z_mean, z_log_var
+# Build vocabulary from the tokens
+def build_vocab(tokens):
+    vocab = {'<PAD>': 0}
+    for token in tokens:
+        if token not in vocab:
+            vocab[token] = len(vocab)
+    return vocab
 
-# Define Decoder Model
-class Decoder(nn.Module):
-    def __init__(self, input_shape, latent_dim):
-        super(Decoder, self).__init__()
-        self.fc1 = nn.Linear(latent_dim, 128)
-        self.relu1 = nn.ReLU()
-        self.fc2 = nn.Linear(128, input_shape[0]*input_shape[1])
-        self.relu2 = nn.ReLU()
-        self.reshape = nn.Reshape(1, input_shape[0], input_shape[1])
-        self.conv_transpose1 = nn.ConvTranspose2d(1, 32, kernel_size=(3, 3), stride=(2, 2), padding=1, output_padding=1)
-        self.relu3 = nn.ReLU()
-        self.conv_transpose2 = nn.ConvTranspose2d(32, 16, kernel_size=(3, 3), stride=(2, 2), padding=1, output_padding=1)
-        self.relu4 = nn.ReLU()
-        self.conv_transpose3 = nn.ConvTranspose2d(16, 1, kernel_size=(3, 3), padding=1)
+# Convert tokens to indices based on the vocabulary
+def tokens_to_indices(tokens, vocab):
+    return [vocab.get(token, 0) for token in tokens]  # Use 0 as the default index for unknown tokens
 
-    def forward(self, z):
-        x = self.fc1(z)
-        x = self.relu1(x)
-        x = self.fc2(x)
-        x = self.relu2(x)
-        x = self.reshape(x)
-        x = self.conv_transpose1(x)
-        x = self.relu3(x)
-        x = self.conv_transpose2(x)
-        x = self.relu4(x)
-        x = self.conv_transpose3(x)
-        return x
+class TextDataset(Dataset):
+    def __init__(self, directory, vocab):
+        self.data = []
+        self.vocab = vocab
+        
+        for filename in os.listdir(directory):
+            if filename.endswith(".txt"):  # Assuming the text files have .txt extension
+                with open(os.path.join(directory, filename), 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    tokens = tokenize_input(content)
+                    indexed_data = tokens_to_indices(tokens, self.vocab)
+                    self.data.append(indexed_data)
 
-# Define HT-VAE Model
-class HT_VAE(nn.Module):
-    def __init__(self, input_shape, latent_dim):
-        super(HT_VAE, self).__init__()
-        self.encoder = Encoder(input_shape, latent_dim)
-        self.decoder = Decoder(input_shape, latent_dim)
+    def __len__(self):
+        return len(self.data)
 
-    def reparameterize(self, mu, log_var):
+    def __getitem__(self, idx):
+        # make sure all the returned sequences are 354
+        sequence = self.data[idx]
+        while len(sequence) < 354:
+            sequence.append(0)  # Use the PAD index in vocab to populate
+        return torch.LongTensor(sequence)
+
+# Define the VAE model
+class HTVAE(nn.Module):
+    def __init__(self, vocab_size, latent_dim=20, embed_dim=128, hidden_dim=256):
+        super(HTVAE, self).__init__()
+        
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        
+        # LSTM-encoder
+        self.encoder_rnn = nn.LSTM(embed_dim, hidden_dim, batch_first=True)
+        self.mean_layer = nn.Linear(hidden_dim, latent_dim)
+        self.var_layer = nn.Linear(hidden_dim, latent_dim)
+        
+        # LSTM-decoder
+        self.decoder_rnn = nn.LSTM(latent_dim, hidden_dim, batch_first=True)
+        self.decoder_output = nn.Linear(hidden_dim, vocab_size)
+
+    def reparameterize(self, mean, log_var):
         std = torch.exp(0.5 * log_var)
         epsilon = torch.randn_like(std)
-        return mu + epsilon * std
+        return mean + std * epsilon
 
     def forward(self, x):
-        z_mean, z_log_var = self.encoder(x)
-        z = self.reparameterize(z_mean, z_log_var)
-        return self.decoder(z)
+        x_embed = self.embedding(x)
+        _, (h_n, _) = self.encoder_rnn(x_embed)
+        
+        h_n = h_n.squeeze(0)
+        
+        mean = self.mean_layer(h_n)
+        log_var = self.var_layer(h_n)
+        z = self.reparameterize(mean, log_var)
+        
+        # Here we copy z so that it matches the length of the input sequence
+        z_repeated = z.unsqueeze(1).repeat(1, x.size(1), 1)
+        
+        dec_output, _ = self.decoder_rnn(z_repeated)
+        x_hat = self.decoder_output(dec_output)
+        
+        return x_hat, mean, log_var
 
-# Load the syntax vectors (Assuming you have generated and saved them using paser.py)
-syntax_vectors = []
-for i in range(600):
-    with open(f"{i}_syntax_vector.txt", "r") as f:
-        syntax_vector = f.read().splitlines()
-    syntax_vectors.append(syntax_vector)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# Preprocess the syntax vectors (convert to numpy array and pad if necessary)
-max_seq_length = max(len(seq) for seq in syntax_vectors)
-padded_syntax_vectors = [seq + ['PAD'] * (max_seq_length - len(seq)) for seq in syntax_vectors]
-padded_syntax_vectors = np.array(padded_syntax_vectors)
+# Calculate VAE loss
+def vae_loss(x, x_hat, mean, log_var):
+    # nn.CrossEntropyLoss expects inputs to be probabilities
+    # and targets to be class indices
+    x = x.long()  # Make sure x is LongTensor
+    x_hat = x_hat.view(-1, x_hat.size(-1))  # Reshape x_hat to 2D tensor
+    x = x.view(-1)  # Reshape x to 1D tensor
+    
+    reconstruction_loss = nn.CrossEntropyLoss(reduction='sum')(x_hat, x)
+    
+    kl_divergence = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
+    
+    return reconstruction_loss + kl_divergence
 
-# Create PyTorch DataLoader
-batch_size = 32
-syntax_tensor = torch.tensor(padded_syntax_vectors, dtype=torch.float32)
-dataset = TensorDataset(syntax_tensor)
-dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+def train_vae(vae, dataloader, num_epochs=1500, learning_rate=0.001):
+    vae = vae.to(device)  # Move the model to the appropriate device
+    optimizer = optim.Adam(vae.parameters(), lr=learning_rate)
+    
+    for epoch in range(num_epochs):
+        for batch in dataloader:
+            batch = batch.to(device)
+            optimizer.zero_grad()
+            x_hat, mean, log_var = vae(batch)
+            loss = vae_loss(batch.float(), x_hat, mean, log_var)
+            loss.backward()
+            optimizer.step()
+        print(f'Epoch {epoch+1}/{num_epochs}, Loss: {loss.item():.4f}')
 
-# Define model hyperparameters
-input_shape = (max_seq_length,)  # Replace this with the actual input shape of your syntax vectors
-latent_dim = 32  # Replace this with the desired latent dimension
+    # Save the trained model
+    torch.save(vae.state_dict(), 'trained_ht_vae.pt')
 
-# Build and train the HT-VAE model
-htvae = HT_VAE(input_shape, latent_dim)
-optimizer = optim.Adam(htvae.parameters(), lr=0.001)
+if __name__ == '__main__':
+    data_dir = '../data/AES-T_Sequence'
+    
+    # Build vocabulary from all files
+    all_tokens = []
+    for filename in os.listdir(data_dir):
+        if filename.endswith(".txt"):
+            with open(os.path.join(data_dir, filename), 'r', encoding='utf-8') as f:
+                content = f.read()
+                tokens = tokenize_input(content)
+                all_tokens.extend(tokens)
 
-def loss_function(recon_x, x, mu, log_var):
-    BCE = nn.functional.binary_cross_entropy(recon_x, x, reduction='sum')
-    KLD = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
-    return BCE + KLD
+    vocab = build_vocab(all_tokens)
+    
+    # Load data
+    dataset = TextDataset(data_dir, vocab)
+    dataloader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=lambda x: nn.utils.rnn.pad_sequence(x, batch_first=True))
 
-epochs = 900
-for epoch in range(epochs):
-    total_loss = 0
-    for batch in dataloader:
-        optimizer.zero_grad()
-        batch = batch[0]  # Remove the extra batch dimension added by DataLoader
-        recon_batch = htvae(batch)
-        loss = loss_function(recon_batch, batch, z_mean, z_log_var)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-    print(f"Epoch {epoch + 1}/{epochs}, Loss: {total_loss}")
+    # Initialize the VAE model
+    vae = HTVAE(len(vocab))
 
-# Save the trained model if needed
-# torch.save(htvae.state_dict(), "trained_htvae_model.pt")
+    # Train the VAE
+    train_vae(vae, dataloader)
