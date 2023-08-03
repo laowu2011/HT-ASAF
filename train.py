@@ -3,22 +3,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-
-# Tokenize the input data
-def tokenize_input(data):
-    return [token for token in data.split() if token not in ['(', 'at', ')']]
-
-# Build vocabulary from the tokens
-def build_vocab(tokens):
-    vocab = {'<PAD>': 0}
-    for token in tokens:
-        if token not in vocab:
-            vocab[token] = len(vocab)
-    return vocab
-
-# Convert tokens to indices based on the vocabulary
-def tokens_to_indices(tokens, vocab):
-    return [vocab.get(token, 0) for token in tokens]  # Use 0 as the default index for unknown tokens
+import sys
+sys.path.append("..//")
+from model.HTVAE import HTVAE
+from model.HTVAE import tokenize_input
+from model.HTVAE import build_vocab
+from model.HTVAE import tokens_to_indices
 
 class TextDataset(Dataset):
     def __init__(self, directory, vocab):
@@ -43,46 +33,6 @@ class TextDataset(Dataset):
             sequence.append(0)  # Use the PAD index in vocab to populate
         return torch.LongTensor(sequence)
 
-# Define the VAE model
-class HTVAE(nn.Module):
-    def __init__(self, vocab_size, latent_dim=20, embed_dim=128, hidden_dim=256):
-        super(HTVAE, self).__init__()
-        
-        self.embedding = nn.Embedding(vocab_size, embed_dim)
-        
-        # LSTM-encoder
-        self.encoder_rnn = nn.LSTM(embed_dim, hidden_dim, batch_first=True)
-        self.mean_layer = nn.Linear(hidden_dim, latent_dim)
-        self.var_layer = nn.Linear(hidden_dim, latent_dim)
-        
-        # LSTM-decoder
-        self.decoder_rnn = nn.LSTM(latent_dim, hidden_dim, batch_first=True)
-        self.decoder_output = nn.Linear(hidden_dim, vocab_size)
-
-    def reparameterize(self, mean, log_var):
-        std = torch.exp(0.5 * log_var)
-        epsilon = torch.randn_like(std)
-        return mean + std * epsilon
-
-    def forward(self, x):
-        x_embed = self.embedding(x)
-        _, (h_n, _) = self.encoder_rnn(x_embed)
-        
-        h_n = h_n.squeeze(0)
-        
-        mean = self.mean_layer(h_n)
-        log_var = self.var_layer(h_n)
-        z = self.reparameterize(mean, log_var)
-        
-        # Here we copy z so that it matches the length of the input sequence
-        z_repeated = z.unsqueeze(1).repeat(1, x.size(1), 1)
-        
-        dec_output, _ = self.decoder_rnn(z_repeated)
-        x_hat = self.decoder_output(dec_output)
-        
-        return x_hat, mean, log_var
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Calculate VAE loss
 def vae_loss(x, x_hat, mean, log_var):
@@ -98,7 +48,7 @@ def vae_loss(x, x_hat, mean, log_var):
     
     return reconstruction_loss + kl_divergence
 
-def train_vae(vae, dataloader, num_epochs=1500, learning_rate=0.001):
+def train_vae(vae, dataloader, num_epochs=15, learning_rate=0.001):
     vae = vae.to(device)  # Move the model to the appropriate device
     optimizer = optim.Adam(vae.parameters(), lr=learning_rate)
     
@@ -113,11 +63,11 @@ def train_vae(vae, dataloader, num_epochs=1500, learning_rate=0.001):
         print(f'Epoch {epoch+1}/{num_epochs}, Loss: {loss.item():.4f}')
 
     # Save the trained model
-    torch.save(vae.state_dict(), 'trained_ht_vae.pt')
+    torch.save(vae.state_dict(), '../model/trained_ht_vae.pt')
 
 if __name__ == '__main__':
     data_dir = '../data/AES-T_Sequence'
-    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # Build vocabulary from all files
     all_tokens = []
     for filename in os.listdir(data_dir):
